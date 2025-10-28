@@ -1,20 +1,19 @@
-name: deploy
+name: 'deploy'
+
 on:
   push:
     paths:
+      - '.github/workflows/**'
       - 'src/**'
-      - '.github/workflows/deploy.yml'
+      - 'build.gradle'
       - 'Dockerfile'
-      - 'README.md'
+      - 'readme.md'
+      - 'infraScript/**'
     branches:
       - 'main'
 
 env:
-  DOCKER_IMAGE_NAME: blog
-
-permissions:
-  contents: write # 태그/릴리즈
-  packages: write # GHCR 푸시
+  IMAGE_NAME: blog-1  # ✅ 도커 이미지 이름 고정
 
 jobs:
   makeTagAndRelease:
@@ -23,13 +22,11 @@ jobs:
       tag_name: ${{ steps.create_tag.outputs.new_tag }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Create Tag
         id: create_tag
         uses: mathieudutour/github-tag-action@v6.1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -48,37 +45,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Docker Buildx 설치
         uses: docker/setup-buildx-action@v2
-
       - name: 레지스트리 로그인
         uses: docker/login-action@v2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: set lower case owner name
         run: |
           echo "OWNER_LC=${OWNER,,}" >> ${GITHUB_ENV}
         env:
           OWNER: "${{ github.repository_owner }}"
-
       - name: application-secret.yml 생성
         env:
-          ACTIONS_STEP_DEBUG: true
           APPLICATION_SECRET: ${{ secrets.APPLICATION_SECRET_YML }}
         run: echo "$APPLICATION_SECRET" > src/main/resources/application-secret.yml
-
       - name: 빌드 앤 푸시
         uses: docker/build-push-action@v3
         with:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ env.OWNER_LC }}/${{ env.DOCKER_IMAGE_NAME }}:${{ needs.makeTagAndRelease.outputs.tag_name }},
-            ghcr.io/${{ env.OWNER_LC }}/${{ env.DOCKER_IMAGE_NAME }}:latest
+            ghcr.io/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME }}:${{ needs.makeTagAndRelease.outputs.tag_name }},
+            ghcr.io/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME }}:latest
 
   deploy:
     runs-on: ubuntu-latest
@@ -91,106 +82,13 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          instance-ids: "${{ secrets.AWS_EC2_INSTANCE_ID }}"
+          instance-ids: "${AWS-EC2-인스턴스-ID}"
           working-directory: /
-          comment: Deploy from GitHub Actions
+          comment: Deploy
           command: |
-            set -e
-            
-            # 변수 설정
-            OWNER="${{ github.repository_owner }}"
-            OWNER_LC=$(echo "${OWNER}" | tr '[:upper:]' '[:lower:]')
-            IMAGE="ghcr.io/${OWNER_LC}/${{ env.DOCKER_IMAGE_NAME }}:latest"
-            NAME=${{ env.DOCKER_IMAGE_NAME }}
-            PORT=8080
-
-            echo "==================== 배포 시작 ===================="
-            echo "Image: $IMAGE"
-            echo "Container: $NAME"
-            echo "Port: $PORT"
-            echo "Time: $(date '+%Y-%m-%d %H:%M:%S')"
-            echo "=================================================="
-
-            # [1/5] GitHub Container Registry 로그인
-            echo ""
-            echo "[1/5] GitHub Container Registry 로그인 중..."
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            if [ $? -eq 0 ]; then
-              echo "✅ 로그인 성공"
-            else
-              echo "❌ 로그인 실패"
-              exit 1
-            fi
-
-            # [2/5] 기존 컨테이너 중지 및 삭제
-            echo ""
-            echo "[2/5] 기존 컨테이너 정리 중..."
-            if docker ps -a --format '{{.Names}}' | grep -q "^${NAME}$"; then
-              echo "기존 컨테이너 발견: $NAME"
-              docker stop "$NAME" 2>/dev/null || true
-              docker rm "$NAME" 2>/dev/null || true
-              echo "✅ 기존 컨테이너 삭제 완료"
-            else
-              echo "기존 컨테이너 없음"
-            fi
-
-            # [3/5] 기존 이미지 삭제 (선택적)
-            echo ""
-            echo "[3/5] 기존 이미지 정리 중..."
-            docker rmi "$IMAGE" 2>/dev/null || echo "기존 이미지 없음"
-
-            # [4/5] 최신 이미지 Pull
-            echo ""
-            echo "[4/5] 최신 이미지 다운로드 중..."
-            if docker pull "$IMAGE"; then
-              echo "✅ 이미지 Pull 성공"
-              docker images | grep "${{ env.DOCKER_IMAGE_NAME }}" || true
-            else
-              echo "❌ 이미지 Pull 실패"
-              exit 1
-            fi
-
-            # [5/5] 새 컨테이너 실행
-            echo ""
-            echo "[5/5] 새 컨테이너 실행 중..."
-            
-            mkdir -p /dockerProjects/$NAME/volumes/gen
-            
-            docker run -d \
-              --name "$NAME" \
-              --restart unless-stopped \
-              -p ${PORT}:8080 \
-              -e TZ=Asia/Seoul \
-              -e SPRING_PROFILES_ACTIVE=prod \
-              -v /dockerProjects/$NAME/volumes/gen:/gen \
-              "$IMAGE"
-            
-            if [ $? -eq 0 ]; then
-              echo "✅ 컨테이너 실행 성공"
-            else
-              echo "❌ 컨테이너 실행 실패"
-              exit 1
-            fi
-
-            echo ""
-            echo "==================== 배포 결과 ===================="
-            echo "대기 중... (5초)"
-            sleep 5
-            
-            echo ""
-            echo "📦 실행 중인 컨테이너:"
-            docker ps --filter "name=$NAME" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-            
-            echo ""
-            echo "📋 컨테이너 로그 (최근 30줄):"
-            docker logs "$NAME" --tail 30 2>&1 || echo "로그를 가져올 수 없습니다"
-            
-            echo ""
-            if docker ps --filter "name=$NAME" --format '{{.Names}}' | grep -q "^${NAME}$"; then
-              echo "✅✅✅ 배포 성공! ✅✅✅"
-            else
-              echo "❌❌❌ 배포 실패! ❌❌❌"
-              docker logs "$NAME" 2>&1 || true
-              exit 1
-            fi
-            echo "=================================================="
+            echo "=== 배포 시작 ==="
+            docker stop ${{ env.IMAGE_NAME }} || true
+            docker rm ${{ env.IMAGE_NAME }} || true
+            docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+            docker run -d --name ${{ env.IMAGE_NAME }} -p 8080:8080 ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+            echo "=== 배포 완료 ==="
